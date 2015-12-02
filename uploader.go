@@ -13,22 +13,23 @@ import (
 )
 
 /**
-  This is a special type of Http server.
+  Uploader is a special type of Http server.
   Put any config state in here.
   The point of this server is to show how
   upload and download can be extremely efficient
   for large files.
 */
-type Uploader struct {
+type uploader struct {
 	HomeBucket string
 }
 
 /**
+  Uploader has a function to drain an http request off to a filename
   Note that writing to a file is not the only possible course of action.
   The part name (or file name, content type, etc) may insinuate that the file
   is small, and should be held in memory.
 */
-func (h Uploader) ServeHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) {
+func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) {
 	log.Printf("read part %s", fileName)
 	//Dangerous... Should whitelist char names to prevent writes
 	//outside the homeBucket!
@@ -63,11 +64,13 @@ func (h Uploader) ServeHTTPUploadPOSTDrain(fileName string, w http.ResponseWrite
 		}
 	}
 	log.Printf("wrote file %s of length %d", fileName, bytesWritten)
-        //Watchout for hardcoding.  This is here to make it convenient to retrieve what you downloaded
+	//Watchout for hardcoding.  This is here to make it convenient to retrieve what you downloaded
 	log.Printf("http://localhost:6060/download/%s", fileName[1+len(h.HomeBucket):])
 }
 
 /**
+  Uploader retrieve a form for doing uploads.
+
   Serve up an example form.  There is nothing preventing
   a client from deciding to send us a POST with 1000
   1Gb to 64Gb files in them.  That would be something like
@@ -77,7 +80,7 @@ func (h Uploader) ServeHTTPUploadPOSTDrain(fileName string, w http.ResponseWrite
   than this must fail.  But for the multi-part mime chunks,
   we must handle files larger than memory.
 */
-func (h Uploader) ServeHTTPUploadGETMsg(msg string, w http.ResponseWriter, r *http.Request) {
+func (h uploader) serveHTTPUploadGETMsg(msg string, w http.ResponseWriter, r *http.Request) {
 	log.Print("get an upload get")
 	r.Header.Set("Content-Type", "text/html")
 	fmt.Fprintf(w, "<html>")
@@ -113,7 +116,7 @@ func (h Uploader) ServeHTTPUploadGETMsg(msg string, w http.ResponseWriter, r *ht
   to ensure that sessions started can complete without interference
   from sessions that are doomed to fail from congestion.
 */
-func (h Uploader) ServeHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
+func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 	log.Print("handling an upload post")
 	multipartReader, err := r.MultipartReader()
 
@@ -137,18 +140,21 @@ func (h Uploader) ServeHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 			if len(part.FileName()) > 0 {
 				fileName := h.HomeBucket + "/" + part.FileName()
 				//Could take an *indefinite* amount of time!!
-				h.ServeHTTPUploadPOSTDrain(fileName, w, part)
+				h.serveHTTPUploadPOSTDrain(fileName, w, part)
 			}
 		}
 	}
-	h.ServeHTTPUploadGETMsg("ok", w, r)
+	h.serveHTTPUploadGETMsg("ok", w, r)
 }
 
-func (h Uploader) ServeHTTPUploadGET(w http.ResponseWriter, r *http.Request) {
-	h.ServeHTTPUploadGETMsg("", w, r)
+/**
+Uploader method to show a form with no status from previous upload
+*/
+func (h uploader) serveHTTPUploadGET(w http.ResponseWriter, r *http.Request) {
+	h.serveHTTPUploadGETMsg("", w, r)
 }
 
-func (h Uploader) ServeHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
+func (h uploader) serveHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
 	fileName := h.HomeBucket + "/" + r.URL.RequestURI()[len("/download/"):]
 	log.Printf("download request for %s", fileName)
 	downloadFrom, err := os.Open(fileName)
@@ -182,18 +188,18 @@ func (h Uploader) ServeHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
 /**
   Handle command routing explicitly.
 */
-func (h Uploader) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h uploader) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.Compare(r.URL.RequestURI(), "/upload") == 0 {
 		if strings.Compare(r.Method, "GET") == 0 {
-			h.ServeHTTPUploadGET(w, r)
+			h.serveHTTPUploadGET(w, r)
 		} else {
 			if strings.Compare(r.Method, "POST") == 0 {
-				h.ServeHTTPUploadPOST(w, r)
+				h.serveHTTPUploadPOST(w, r)
 			}
 		}
 	} else {
 		if strings.HasPrefix(r.URL.RequestURI(), "/download/") {
-			h.ServeHTTPDownloadGET(w, r)
+			h.serveHTTPDownloadGET(w, r)
 		}
 	}
 }
@@ -212,12 +218,12 @@ func main() {
 	os.Mkdir("/tmp/uploader", 0700)
 	s := &http.Server{
 		Addr: ":6060",
-		Handler: Uploader{
+		Handler: uploader{
 			HomeBucket: "/tmp/uploader",
 		},
-		ReadTimeout:    10000 * time.Second, //I don't like this
-		WriteTimeout:   10000 * time.Second, //Do not like
-		MaxHeaderBytes: 1 << 20,             //This prevents clients from DOS'ing us
+		ReadTimeout:    10 * time.Second, //I don't like this
+		WriteTimeout:   10 * time.Second, //Do not like
+		MaxHeaderBytes: 1 << 20,          //This prevents clients from DOS'ing us
 	}
 
 	log.Printf("open a browser at: %s", "http://localhost"+s.Addr+"/upload")
