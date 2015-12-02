@@ -14,6 +14,7 @@ of memory
 
 Browser:
 
+* run ./gencerts so that the SSL server can launch
 * go run uploader.go
 * by default it uses /tmp/uploader, a directory that should exist
 * http://localhost:6060/upload   (pick some file, like foo.txt)
