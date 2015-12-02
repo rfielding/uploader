@@ -8,4 +8,11 @@ in memory is bounded.
 It is possible to have a hybrid that keeps a reasonable amount of
 data in memory without ever writing it to disk, and flushes
 to disk when a session is going to begin to use unfair amounts
-of memory.
+of memory
+
+
+Browser:
+
+* by default it uses /tmp/uploader, a directory that should exist
+* http://localhost:6060/upload   (pick some file, like foo.txt)
+* http://localhost:6060/download/foo.txt  (assuming you uploaded it)
