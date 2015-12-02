@@ -28,7 +28,7 @@ type Uploader struct {
   The part name (or file name, content type, etc) may insinuate that the file
   is small, and should be held in memory.
 */
-func ServeHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) {
+func (h Uploader) ServeHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) {
 	log.Printf("read part %s", fileName)
 	//Dangerous... Should whitelist char names to prevent writes
 	//outside the homeBucket!
@@ -63,6 +63,8 @@ func ServeHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *mult
 		}
 	}
 	log.Printf("wrote file %s of length %d", fileName, bytesWritten)
+        //Watchout for hardcoding.  This is here to make it convenient to retrieve what you downloaded
+	log.Printf("http://localhost:6060/download/%s", fileName[1+len(h.HomeBucket):])
 }
 
 /**
@@ -135,7 +137,7 @@ func (h Uploader) ServeHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 			if len(part.FileName()) > 0 {
 				fileName := h.HomeBucket + "/" + part.FileName()
 				//Could take an *indefinite* amount of time!!
-				ServeHTTPUploadPOSTDrain(fileName, w, part)
+				h.ServeHTTPUploadPOSTDrain(fileName, w, part)
 			}
 		}
 	}
@@ -206,6 +208,8 @@ func (h Uploader) ServeHTTP(w http.ResponseWriter, r *http.Request) {
   because large files just take longer.
 */
 func main() {
+	//Being in tmp, this disappears on reboot, etc
+	os.Mkdir("/tmp/uploader", 0700)
 	s := &http.Server{
 		Addr: ":6060",
 		Handler: Uploader{
