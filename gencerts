@@ -1,0 +1,5 @@
+#!/bin/bash
+
+openssl genrsa -out key.pem 2048 && \
+openssl req -x509 -new -nodes -key key.pem -days 720 -out cert.pem && \
+openssl x509 -in cert.pem -text
