@@ -11,8 +11,10 @@ to disk when a session is going to begin to use unfair amounts
 of memory
 
 
+
 Browser:
 
+* go run uploader.go
 * by default it uses /tmp/uploader, a directory that should exist
 * http://localhost:6060/upload   (pick some file, like foo.txt)
 * http://localhost:6060/download/foo.txt  (assuming you uploaded it)
