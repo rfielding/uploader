@@ -213,10 +213,10 @@ func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 	}
 	h.serveHTTPUploadGETMsg("ok", w, r)
 	stopTime := time.Now()
-	timeDiff := (stopTime.UnixNano()-startTime.UnixNano())/1000 + 1
+	timeDiff := (stopTime.UnixNano()-startTime.UnixNano())/(1000*1000) + 1
 	throughput := (1000 * partBytes) / timeDiff
 	partSize := int64(0)
-	if partCount > 0 {
+	if partCount <= 0 {
 		partSize = 0
 	} else {
 		partSize = partBytes / partCount
@@ -267,7 +267,7 @@ func (h uploader) serveHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("returned file %s of length %d", fileName, bytesWritten)
 	stopTime := time.Now()
-	timeDiff := (stopTime.UnixNano()-startTime.UnixNano())/1000 + 1
+	timeDiff := (stopTime.UnixNano()-startTime.UnixNano())/(1000*1000) + 1
 	throughput := (1000 * bytesWritten) / timeDiff
 	partSize := int64(0)
 	if partsWritten <= 0 {
