@@ -26,6 +26,7 @@ type uploader struct {
 	Bind         string
 	Addr         string
 	UploadCookie string
+	BufferSize   int
 }
 
 /**
@@ -34,7 +35,7 @@ type uploader struct {
   The part name (or file name, content type, etc) may insinuate that the file
   is small, and should be held in memory.
 */
-func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) {
+func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) (bytesWritten int64, partsWritten int64) {
 	log.Printf("read part %s", fileName)
 	//Dangerous... Should whitelist char names to prevent writes
 	//outside the homeBucket!
@@ -44,13 +45,12 @@ func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWrite
 	if drainErr != nil {
 		log.Printf("cannot write out file %s, %v", fileName, drainErr)
 		http.Error(w, "cannot write out file", 500)
-		return
+		return bytesWritten, partsWritten
 	}
 
 	drain := bufio.NewWriter(drainTo)
-	var bytesWritten int64
 	var lastBytesRead int
-	buffer := make([]byte, 1024*8)
+	buffer := make([]byte, h.BufferSize)
 	for lastBytesRead >= 0 {
 		bytesRead, berr := part.Read(buffer)
 		lastBytesRead = bytesRead
@@ -60,17 +60,20 @@ func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWrite
 		if berr != nil {
 			log.Printf("error reading data! %v", berr)
 			http.Error(w, "error reading data", 500)
-			return
+			return bytesWritten, partsWritten
 		}
 		if lastBytesRead > 0 {
 			bytesWritten += int64(lastBytesRead)
 			drain.Write(buffer[:bytesRead])
-			drain.Flush()
+			partsWritten++
 		}
 	}
+	drain.Flush()
 	log.Printf("wrote file %s of length %d", fileName, bytesWritten)
 	//Watchout for hardcoding.  This is here to make it convenient to retrieve what you downloaded
 	log.Printf("https://127.0.0.1:%d/download/%s", h.Port, fileName[1+len(h.HomeBucket):])
+
+	return bytesWritten, partsWritten
 }
 
 /**
@@ -104,48 +107,43 @@ func (h uploader) serveHTTPUploadGETMsg(msg string, w http.ResponseWriter, r *ht
 }
 
 /**
-  Minor DOS Security hole: NextPart doesn't have a memory max specified.
-	But anyways, really large cookies will fail to verify.
-
-	TODO: this upload cookie should be cryptographically checkable,
-	so that a different service can generated the cookie, and we can
-	read it to verify that the URI is a valid resource.  (ie:
-  an AWS signed url, but where we also have a session cookie
-  to validate that the user of the URL is the one it was granted to.
-  We assume that URLs are routinely leaked before they expire,
-  unlike session cookies.)
+  Check a value against a bounded(!) buffer
 */
-func (h uploader) checkUploadCookie(part *multipart.Part) bool {
-	//We must do a BOUNDED read of the cookie.  Just let it fail if it's not < 8k
-	buffer := make([]byte, 1024*8)
+func valCheck(buffer []byte, refVal []byte, checkedVal *multipart.Part) bool {
 	totalBytesRead := 0
+	bufferLength := len(buffer)
 	for {
-		//Bail out if we are looking at a 4k+ cookie that is not done reading
-		if totalBytesRead > len(buffer)/2 {
+		if totalBytesRead >= bufferLength {
 			break
 		}
-		//Read more bytes (fill into one buffer if possible)
-		bytesRead, err := part.Read(buffer[totalBytesRead:])
+		bytesRead, err := checkedVal.Read(buffer[totalBytesRead:])
 		if bytesRead < 0 || err == io.EOF {
 			break
 		}
 		totalBytesRead += bytesRead
 	}
 
-	//If UploadCookie is a prefix, then they know the cookie
 	i := 0
-	uploadCookieBytes := []byte(h.UploadCookie)
-	if totalBytesRead != len(uploadCookieBytes) {
+	refValLength := len(refVal)
+	if totalBytesRead != refValLength {
 		return false
 	}
-	for i < len(uploadCookieBytes) {
-		if uploadCookieBytes[i] != buffer[i] {
+	for i < refValLength {
+		if refVal[i] != buffer[i] {
 			return false
 		}
 		i++
 	}
 
 	return true
+
+}
+
+func (h uploader) checkUploadCookie(part *multipart.Part) bool {
+	//We must do a BOUNDED read of the cookie.  Just let it fail if it's not < 8k
+	buffer := make([]byte, h.BufferSize)
+	uploadCookieBytes := []byte(h.UploadCookie)
+	return valCheck(buffer, uploadCookieBytes, part)
 }
 
 /**
@@ -167,6 +165,7 @@ func (h uploader) checkUploadCookie(part *multipart.Part) bool {
   from sessions that are doomed to fail from congestion.
 */
 func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	log.Print("handling an upload post")
 	multipartReader, err := r.MultipartReader()
 
@@ -177,10 +176,13 @@ func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isAuthorized := false
+	partBytes := int64(0)
+	partCount := int64(0)
 	for {
+		//DOS problem .... what if this header is very large?  (Intentionally)
 		part, partErr := multipartReader.NextPart()
 		if partErr != nil {
-			if partErr == io.EOF || part == nil {
+			if partErr == io.EOF {
 				break //just an eof...not an error
 			} else {
 				log.Printf("error getting a part %v", partErr)
@@ -197,7 +199,9 @@ func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 					if isAuthorized {
 						fileName := h.HomeBucket + "/" + part.FileName()
 						//Could take an *indefinite* amount of time!!
-						h.serveHTTPUploadPOSTDrain(fileName, w, part)
+						partBytesIncr, partCountIncr := h.serveHTTPUploadPOSTDrain(fileName, w, part)
+						partBytes += partBytesIncr
+						partCount += partCountIncr
 					} else {
 						log.Printf("failed authorization for file")
 						http.Error(w, "failed authorization for file", 400)
@@ -208,6 +212,16 @@ func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.serveHTTPUploadGETMsg("ok", w, r)
+	stopTime := time.Now()
+	timeDiff := (stopTime.UnixNano()-startTime.UnixNano())/1000 + 1
+	throughput := (1000 * partBytes) / timeDiff
+	partSize := int64(0)
+	if partCount > 0 {
+		partSize = 0
+	} else {
+		partSize = partBytes / partCount
+	}
+	log.Printf("Upload: time = %dms, size = %d B, throughput = %d B/s, partSize = %d B", timeDiff, partBytes, throughput, partSize)
 }
 
 /**
@@ -217,7 +231,11 @@ func (h uploader) serveHTTPUploadGET(w http.ResponseWriter, r *http.Request) {
 	h.serveHTTPUploadGETMsg("", w, r)
 }
 
+/**
+Efficiently retrieve a file
+*/
 func (h uploader) serveHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	fileName := h.HomeBucket + "/" + r.URL.RequestURI()[len("/download/"):]
 	log.Printf("download request for %s", fileName)
 	downloadFrom, err := os.Open(fileName)
@@ -226,9 +244,10 @@ func (h uploader) serveHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to open file for reading", 500)
 		return
 	}
-	var bytesWritten = 0
+	var partsWritten = int64(0)
+	var bytesWritten = int64(0)
 	var lastBytesRead = 0
-	buffer := make([]byte, 1024*8)
+	buffer := make([]byte, h.BufferSize)
 	for lastBytesRead >= 0 {
 		bytesRead, berr := downloadFrom.Read(buffer)
 		lastBytesRead = bytesRead
@@ -241,11 +260,22 @@ func (h uploader) serveHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if lastBytesRead > 0 {
-			bytesWritten += lastBytesRead
+			bytesWritten += int64(lastBytesRead)
+			partsWritten++
 			w.Write(buffer[:bytesRead])
 		}
 	}
 	log.Printf("returned file %s of length %d", fileName, bytesWritten)
+	stopTime := time.Now()
+	timeDiff := (stopTime.UnixNano()-startTime.UnixNano())/1000 + 1
+	throughput := (1000 * bytesWritten) / timeDiff
+	partSize := int64(0)
+	if partsWritten <= 0 {
+		partSize = 0
+	} else {
+		partSize = bytesWritten / partsWritten
+	}
+	log.Printf("Download: time = %dms, size = %d B, throughput = %d B/s, partSize = %d B", timeDiff, bytesWritten, throughput, partSize)
 }
 
 /**
@@ -285,6 +315,7 @@ func makeServer(
 		Port:         port,
 		Bind:         bind,
 		UploadCookie: uploadCookie,
+		BufferSize:   1024 * 8, //Each session takes a buffer that guarantees the number of sessions in our SLA
 	}
 	h.Addr = h.Bind + ":" + strconv.Itoa(h.Port)
 
@@ -309,7 +340,6 @@ func makeServer(
 */
 func main() {
 	s := makeServer("/tmp/uploader", "127.0.0.1", 6060, "y0UMayUpL0Ad")
-
 	log.Printf("open a browser at: %s", "https://"+s.Addr+"/upload")
 	log.Fatal(s.ListenAndServeTLS("cert.pem", "key.pem"))
 }
