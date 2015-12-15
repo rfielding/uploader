@@ -77,7 +77,7 @@ func doCipherByReaderWriter(inFile io.Reader, outFile io.Writer, key []byte, iv 
 	if err != nil {
 		return err
 	}
-	writeCipherStream := cipher.NewOFB(writeCipher, iv[:])
+	writeCipherStream := cipher.NewCTR(writeCipher, iv[:])
 	if err != nil {
 		return err
 	}
