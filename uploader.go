@@ -1,7 +1,8 @@
 package main
 
 import (
-	"bufio"
+	"crypto/aes"
+	"crypto/cipher"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,26 @@ type uploader struct {
 	Addr         string
 	UploadCookie string
 	BufferSize   int
+	Key          []byte
+	IV           [aes.BlockSize]byte
+}
+
+func doCipherByReaderWriter(inFile io.Reader, outFile io.Writer, key []byte, iv [aes.BlockSize]byte) error {
+	writeCipher, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	writeCipherStream := cipher.NewOFB(writeCipher, iv[:])
+	if err != nil {
+		return err
+	}
+
+	reader := &cipher.StreamReader{S: writeCipherStream, R: inFile}
+	if _, err := io.Copy(outFile, reader); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 /**
@@ -40,40 +61,14 @@ func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWrite
 	//Dangerous... Should whitelist char names to prevent writes
 	//outside the homeBucket!
 	drainTo, drainErr := os.Create(fileName)
+	if drainErr != nil {
+		log.Printf("error draining file: %v", drainErr)
+	}
 	defer drainTo.Close()
 
-	if drainErr != nil {
-		log.Printf("cannot write out file %s, %v", fileName, drainErr)
-		http.Error(w, "cannot write out file", 500)
-		return bytesWritten, partsWritten
-	}
+	doCipherByReaderWriter(part, drainTo, h.Key, h.IV)
 
-	drain := bufio.NewWriter(drainTo)
-	var lastBytesRead int
-	buffer := make([]byte, h.BufferSize)
-	for lastBytesRead >= 0 {
-		bytesRead, berr := part.Read(buffer)
-		lastBytesRead = bytesRead
-		if berr == io.EOF {
-			break
-		}
-		if berr != nil {
-			log.Printf("error reading data! %v", berr)
-			http.Error(w, "error reading data", 500)
-			return bytesWritten, partsWritten
-		}
-		if lastBytesRead > 0 {
-			bytesWritten += int64(lastBytesRead)
-			drain.Write(buffer[:bytesRead])
-			partsWritten++
-		}
-	}
-	drain.Flush()
-	log.Printf("wrote file %s of length %d", fileName, bytesWritten)
-	//Watchout for hardcoding.  This is here to make it convenient to retrieve what you downloaded
-	log.Printf("https://127.0.0.1:%d/download/%s", h.Port, fileName[1+len(h.HomeBucket):])
-
-	return bytesWritten, partsWritten
+	return 0, 0
 }
 
 /**
@@ -235,7 +230,6 @@ func (h uploader) serveHTTPUploadGET(w http.ResponseWriter, r *http.Request) {
 Efficiently retrieve a file
 */
 func (h uploader) serveHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
 	fileName := h.HomeBucket + "/" + r.URL.RequestURI()[len("/download/"):]
 	log.Printf("download request for %s", fileName)
 	downloadFrom, err := os.Open(fileName)
@@ -244,38 +238,8 @@ func (h uploader) serveHTTPDownloadGET(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to open file for reading", 500)
 		return
 	}
-	var partsWritten = int64(0)
-	var bytesWritten = int64(0)
-	var lastBytesRead = 0
-	buffer := make([]byte, h.BufferSize)
-	for lastBytesRead >= 0 {
-		bytesRead, berr := downloadFrom.Read(buffer)
-		lastBytesRead = bytesRead
-		if berr == io.EOF {
-			break
-		}
-		if berr != nil {
-			log.Printf("error reading data! %v", berr)
-			http.Error(w, "error reading data", 500)
-			return
-		}
-		if lastBytesRead > 0 {
-			bytesWritten += int64(lastBytesRead)
-			partsWritten++
-			w.Write(buffer[:bytesRead])
-		}
-	}
-	log.Printf("returned file %s of length %d", fileName, bytesWritten)
-	stopTime := time.Now()
-	timeDiff := (stopTime.UnixNano()-startTime.UnixNano())/(1000*1000) + 1
-	throughput := (1000 * bytesWritten) / timeDiff
-	partSize := int64(0)
-	if partsWritten <= 0 {
-		partSize = 0
-	} else {
-		partSize = bytesWritten / partsWritten
-	}
-	log.Printf("Download: time = %dms, size = %d B, throughput = %d B/s, partSize = %d B", timeDiff, bytesWritten, throughput, partSize)
+	defer downloadFrom.Close()
+	doCipherByReaderWriter(downloadFrom, w, h.Key, h.IV)
 }
 
 /**
@@ -318,6 +282,7 @@ func makeServer(
 		BufferSize:   1024 * 8, //Each session takes a buffer that guarantees the number of sessions in our SLA
 	}
 	h.Addr = h.Bind + ":" + strconv.Itoa(h.Port)
+	h.Key = []byte("asdfadsfadfasdf")
 
 	//A web server is running
 	return &http.Server{
