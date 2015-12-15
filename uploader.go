@@ -32,22 +32,64 @@ type uploader struct {
 	IV           [aes.BlockSize]byte
 }
 
-func doCipherByReaderWriter(inFile io.Reader, outFile io.Writer, key []byte, iv [aes.BlockSize]byte) error {
+// CountingStreamReader takes statistics as it writes
+type CountingStreamReader struct {
+	S cipher.Stream
+	R io.Reader
+}
+
+// Read takes statistics as it writes
+func (r CountingStreamReader) Read(dst []byte) (n int, err error) {
+	log.Printf("r")
+	n, err = r.R.Read(dst)
+	r.S.XORKeyStream(dst[:n], dst[:n])
+	return
+}
+
+// CountingStreamWriter keeps statistics as it writes
+type CountingStreamWriter struct {
+	S     cipher.Stream
+	W     io.Writer
+	Error error
+}
+
+func (w CountingStreamWriter) Write(src []byte) (n int, err error) {
+	log.Printf("w")
+	c := make([]byte, len(src))
+	w.S.XORKeyStream(c, src)
+	n, err = w.W.Write(c)
+	if n != len(src) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+	}
+	return
+}
+
+// Close closes underlying stream
+func (w CountingStreamWriter) Close() error {
+	if c, ok := w.W.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+func doCipherByReaderWriter(inFile io.Reader, outFile io.Writer, key []byte, iv [aes.BlockSize]byte) (length int64, copyErr error) {
 	writeCipher, err := aes.NewCipher(key)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	writeCipherStream := cipher.NewOFB(writeCipher, iv[:])
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	reader := &cipher.StreamReader{S: writeCipherStream, R: inFile}
-	if _, err := io.Copy(outFile, reader); err != nil {
-		return err
+	reader := &CountingStreamReader{S: writeCipherStream, R: inFile}
+	if length, copyErr = io.Copy(outFile, reader); err != nil {
+		return length, err
 	}
 
-	return nil
+	return length, copyErr
 }
 
 /**
@@ -56,7 +98,7 @@ func doCipherByReaderWriter(inFile io.Reader, outFile io.Writer, key []byte, iv 
   The part name (or file name, content type, etc) may insinuate that the file
   is small, and should be held in memory.
 */
-func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) (bytesWritten int64, partsWritten int64) {
+func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) (bytesWritten int64, partsWritten int64, err error) {
 	log.Printf("read part %s", fileName)
 	//Dangerous... Should whitelist char names to prevent writes
 	//outside the homeBucket!
@@ -66,9 +108,9 @@ func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWrite
 	}
 	defer drainTo.Close()
 
-	doCipherByReaderWriter(part, drainTo, h.Key, h.IV)
+	bytesWritten, err = doCipherByReaderWriter(part, drainTo, h.Key, h.IV)
 
-	return 0, 0
+	return bytesWritten, 1, err
 }
 
 /**
@@ -194,7 +236,10 @@ func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 					if isAuthorized {
 						fileName := h.HomeBucket + "/" + part.FileName()
 						//Could take an *indefinite* amount of time!!
-						partBytesIncr, partCountIncr := h.serveHTTPUploadPOSTDrain(fileName, w, part)
+						partBytesIncr, partCountIncr, err := h.serveHTTPUploadPOSTDrain(fileName, w, part)
+						if err != nil {
+							log.Printf("error draining part: %v", err)
+						}
 						partBytes += partBytesIncr
 						partCount += partCountIncr
 					} else {
@@ -282,7 +327,7 @@ func makeServer(
 		BufferSize:   1024 * 8, //Each session takes a buffer that guarantees the number of sessions in our SLA
 	}
 	h.Addr = h.Bind + ":" + strconv.Itoa(h.Port)
-	h.Key = []byte("asdfadsfadfasdf")
+	h.Key = []byte("asdfaddsfadfasdf2543654321546788")
 
 	//A web server is running
 	return &http.Server{
