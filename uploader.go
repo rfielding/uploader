@@ -40,7 +40,6 @@ type CountingStreamReader struct {
 
 // Read takes statistics as it writes
 func (r CountingStreamReader) Read(dst []byte) (n int, err error) {
-	log.Printf("r")
 	n, err = r.R.Read(dst)
 	r.S.XORKeyStream(dst[:n], dst[:n])
 	return
@@ -54,7 +53,6 @@ type CountingStreamWriter struct {
 }
 
 func (w CountingStreamWriter) Write(src []byte) (n int, err error) {
-	log.Printf("w")
 	c := make([]byte, len(src))
 	w.S.XORKeyStream(c, src)
 	n, err = w.W.Write(c)
@@ -74,22 +72,20 @@ func (w CountingStreamWriter) Close() error {
 	return nil
 }
 
-func doCipherByReaderWriter(inFile io.Reader, outFile io.Writer, key []byte, iv [aes.BlockSize]byte) (length int64, copyErr error) {
+func doCipherByReaderWriter(inFile io.Reader, outFile io.Writer, key []byte, iv [aes.BlockSize]byte) error {
 	writeCipher, err := aes.NewCipher(key)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	writeCipherStream := cipher.NewOFB(writeCipher, iv[:])
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	reader := &CountingStreamReader{S: writeCipherStream, R: inFile}
-	if length, copyErr = io.Copy(outFile, reader); err != nil {
-		return length, err
-	}
+	_, err = io.Copy(outFile, reader)
 
-	return length, copyErr
+	return err
 }
 
 /**
@@ -98,19 +94,15 @@ func doCipherByReaderWriter(inFile io.Reader, outFile io.Writer, key []byte, iv 
   The part name (or file name, content type, etc) may insinuate that the file
   is small, and should be held in memory.
 */
-func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) (bytesWritten int64, partsWritten int64, err error) {
+func (h uploader) serveHTTPUploadPOSTDrain(fileName string, w http.ResponseWriter, part *multipart.Part) error {
 	log.Printf("read part %s", fileName)
-	//Dangerous... Should whitelist char names to prevent writes
-	//outside the homeBucket!
 	drainTo, drainErr := os.Create(fileName)
 	if drainErr != nil {
 		log.Printf("error draining file: %v", drainErr)
 	}
 	defer drainTo.Close()
 
-	bytesWritten, err = doCipherByReaderWriter(part, drainTo, h.Key, h.IV)
-
-	return bytesWritten, 1, err
+	return doCipherByReaderWriter(part, drainTo, h.Key, h.IV)
 }
 
 /**
@@ -202,10 +194,7 @@ func (h uploader) checkUploadCookie(part *multipart.Part) bool {
   from sessions that are doomed to fail from congestion.
 */
 func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
-	log.Print("handling an upload post")
 	multipartReader, err := r.MultipartReader()
-
 	if err != nil {
 		log.Printf("failed to get a multipart reader %v", err)
 		http.Error(w, "failed to get a multipart reader", 500)
@@ -213,8 +202,6 @@ func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isAuthorized := false
-	partBytes := int64(0)
-	partCount := int64(0)
 	for {
 		//DOS problem .... what if this header is very large?  (Intentionally)
 		part, partErr := multipartReader.NextPart()
@@ -236,12 +223,10 @@ func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 					if isAuthorized {
 						fileName := h.HomeBucket + "/" + part.FileName()
 						//Could take an *indefinite* amount of time!!
-						partBytesIncr, partCountIncr, err := h.serveHTTPUploadPOSTDrain(fileName, w, part)
+						err := h.serveHTTPUploadPOSTDrain(fileName, w, part)
 						if err != nil {
 							log.Printf("error draining part: %v", err)
 						}
-						partBytes += partBytesIncr
-						partCount += partCountIncr
 					} else {
 						log.Printf("failed authorization for file")
 						http.Error(w, "failed authorization for file", 400)
@@ -252,16 +237,6 @@ func (h uploader) serveHTTPUploadPOST(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.serveHTTPUploadGETMsg("ok", w, r)
-	stopTime := time.Now()
-	timeDiff := (stopTime.UnixNano()-startTime.UnixNano())/(1000*1000) + 1
-	throughput := (1000 * partBytes) / timeDiff
-	partSize := int64(0)
-	if partCount <= 0 {
-		partSize = 0
-	} else {
-		partSize = partBytes / partCount
-	}
-	log.Printf("Upload: time = %dms, size = %d B, throughput = %d B/s, partSize = %d B", timeDiff, partBytes, throughput, partSize)
 }
 
 /**
